@@ -1,0 +1,136 @@
+# Azure DevOps — CI/CD (Build + Testes + Deploy Staging + Produção)
+# Configure no projeto: Pipelines > New pipeline > Azure Repos Git > selecione este repo > Existing Azure Pipelines YAML file
+#
+# Pré-requisitos para CD (deploy):
+# 1) Azure Container Registry (ACR) + dois Web Apps for Containers (staging e produção), ou um único app com slots.
+# 2) Service connection: Project settings > Service connections > Azure Resource Manager.
+# 3) Library: Variable group "cp5-deploy" com: acrLoginServer, acrName, imageRepository, stagingWebAppName, productionWebAppName
+#    ou defina as variáveis abaixo diretamente no pipeline / UI.
+
+trigger:
+  branches:
+    include:
+      - main
+      - master
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  nodeVersion: '20.x'
+  # Ajuste após criar o ACR (ex: meuacr.azurecr.io)
+  acrLoginServer: '$(ACR_LOGIN_SERVER)'
+  imageRepository: 'cp5-demo-api'
+  dockerfilePath: '$(Build.SourcesDirectory)/Dockerfile'
+  tag: '$(Build.BuildId)'
+
+stages:
+  - stage: Build
+    displayName: 'CI — Build e testes'
+    jobs:
+      - job: BuildAndTest
+        displayName: 'Instalar, testar e construir imagem'
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '$(nodeVersion)'
+            displayName: 'Use Node.js'
+
+          - script: |
+              npm ci
+            displayName: 'npm ci'
+
+          - script: |
+              npm test
+            displayName: 'Testes automatizados (Jest)'
+
+          - task: Docker@2
+            displayName: 'Build da imagem Docker (validação)'
+            inputs:
+              command: build
+              repository: '$(imageRepository)'
+              dockerfile: '$(dockerfilePath)'
+              buildContext: '$(Build.SourcesDirectory)'
+              tags: |
+                $(tag)
+                latest
+
+  - stage: DeployStaging
+    displayName: 'CD — Deploy Staging'
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - deployment: DeployStagingJob
+        displayName: 'Publicar imagem e atualizar Web App (staging)'
+        environment: 'staging'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: Docker@2
+                  displayName: 'Login no ACR'
+                  inputs:
+                    command: login
+                    containerRegistry: '$(ACR_SERVICE_CONNECTION)'
+
+                - task: Docker@2
+                  displayName: 'Build e push para ACR (staging tag)'
+                  inputs:
+                    command: buildAndPush
+                    repository: '$(imageRepository)'
+                    dockerfile: '$(dockerfilePath)'
+                    buildContext: '$(Build.SourcesDirectory)'
+                    containerRegistry: '$(ACR_SERVICE_CONNECTION)'
+                    tags: |
+                      $(tag)-staging
+                      staging-latest
+
+                - task: AzureWebAppContainer@1
+                  displayName: 'Atualizar Azure Web App — Staging'
+                  inputs:
+                    azureSubscription: '$(AZURE_SUBSCRIPTION)'
+                    resourceGroupName: '$(RESOURCE_GROUP)'
+                    appName: '$(STAGING_WEBAPP_NAME)'
+                    containers: '$(acrLoginServer)/$(imageRepository):$(tag)-staging'
+
+  - stage: DeployProduction
+    displayName: 'CD — Deploy Produção'
+    dependsOn: DeployStaging
+    condition: succeeded()
+    jobs:
+      - deployment: DeployProductionJob
+        displayName: 'Push produção e atualizar Web App'
+        environment: 'production'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: Docker@2
+                  displayName: 'Login no ACR'
+                  inputs:
+                    command: login
+                    containerRegistry: '$(ACR_SERVICE_CONNECTION)'
+
+                - task: Docker@2
+                  displayName: 'Build e push para ACR (produção tag)'
+                  inputs:
+                    command: buildAndPush
+                    repository: '$(imageRepository)'
+                    dockerfile: '$(dockerfilePath)'
+                    buildContext: '$(Build.SourcesDirectory)'
+                    containerRegistry: '$(ACR_SERVICE_CONNECTION)'
+                    tags: |
+                      $(tag)-prod
+                      prod-latest
+
+                - task: AzureWebAppContainer@1
+                  displayName: 'Atualizar Azure Web App — Produção'
+                  inputs:
+                    azureSubscription: '$(AZURE_SUBSCRIPTION)'
+                    resourceGroupName: '$(RESOURCE_GROUP)'
+                    appName: '$(PRODUCTION_WEBAPP_NAME)'
+                    containers: '$(acrLoginServer)/$(imageRepository):$(tag)-prod'
