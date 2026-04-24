@@ -1,8 +1,8 @@
 const { createApp, buildPoolFromEnv } = require('./app');
 
-// App Service (Linux/container) usa PORT ou WEBSITES_PORT; localmente cai em 3000.
+// App Service: às vezes PORT=8080 e WEBSITES_PORT=3000 — priorizar WEBSITES_PORT para bater com App settings.
 const port =
-  Number(process.env.PORT || process.env.WEBSITES_PORT) || 3000;
+  Number(process.env.WEBSITES_PORT || process.env.PORT) || 3000;
 const pool = buildPoolFromEnv();
 const app = createApp(pool);
 
